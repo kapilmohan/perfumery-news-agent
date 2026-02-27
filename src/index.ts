@@ -4,8 +4,8 @@ import { runAgent } from "./agent";
 async function main() {
   console.log("=== Perfumery News Agent (ReAct) ===\n");
 
-  if (!process.env.ANTHROPIC_API_KEY) {
-    console.error("Error: ANTHROPIC_API_KEY is not set. Create a .env file from .env.example");
+  if (!process.env.GEMINI_API_KEY) {
+    console.error("Error: GEMINI_API_KEY is not set. Create a .env file from .env.example");
     process.exit(1);
   }
 

@@ -1,6 +1,6 @@
 # Perfumery News Agent
 
-A ReAct-style AI agent that autonomously gathers the latest perfumery news from multiple sources, reasons about what it finds, and produces a curated markdown briefing — powered by Claude.
+A ReAct-style AI agent that autonomously gathers the latest perfumery news from multiple sources, reasons about what it finds, and produces a curated markdown briefing — powered by Google Gemini.
 
 ## How It Works
 
@@ -11,7 +11,7 @@ This is not a linear script. It's an **autonomous agent loop** built on the [ReA
 │                  Agent Loop                 │
 │                                             │
 │   ┌──────────┐                              │
-│   │  THINK   │ ← Claude reasons about       │
+│   │  THINK   │ ← Gemini reasons about        │
 │   │          │   what info it has/needs      │
 │   └────┬─────┘                              │
 │        │                                    │
@@ -31,7 +31,7 @@ This is not a linear script. It's an **autonomous agent loop** built on the [ReA
 └─────────────────────────────────────────────┘
 ```
 
-Claude decides at each step:
+Gemini decides at each step:
 - Which RSS feeds to pull
 - Whether to search for additional news via NewsAPI
 - Which articles deserve a full page scrape for more context
@@ -43,10 +43,10 @@ Claude decides at each step:
 ```
 src/
 ├── index.ts              Entry point — loads env, runs the agent
-├── agent.ts              ReAct loop — manages Claude conversation + tool dispatch
+├── agent.ts              ReAct loop — manages Gemini conversation + tool dispatch
 ├── types.ts              Shared types (Article, AgentStep, ToolDefinition)
 └── tools/
-    ├── registry.ts       Tool definitions (Anthropic tool-use format) & dispatcher
+    ├── registry.ts       Tool definitions (Gemini function-calling format) & dispatcher
     ├── fetch-rss.ts      Fetch articles from perfumery RSS feeds
     ├── search-news.ts    Search NewsAPI for perfumery keywords
     ├── scrape-page.ts    Scrape full article text from a URL via Cheerio
@@ -78,7 +78,7 @@ The agent produces a dated markdown report in `reports/perfumery-news-YYYY-MM-DD
 ### Prerequisites
 
 - Node.js 18+
-- An [Anthropic API key](https://console.anthropic.com/)
+- A [Google Gemini API key](https://aistudio.google.com/apikey)
 - (Optional) A [NewsAPI key](https://newsapi.org/) for broader news search
 
 ### Setup
@@ -98,7 +98,7 @@ cp .env.example .env
 Add your API keys:
 
 ```
-ANTHROPIC_API_KEY=sk-ant-...
+GEMINI_API_KEY=your-gemini-api-key
 NEWSAPI_KEY=your-newsapi-key    # optional
 ```
 
@@ -141,7 +141,7 @@ npm run build
 ## Tech Stack
 
 - **TypeScript** — Type-safe agent implementation
-- **Anthropic SDK** (`@anthropic-ai/sdk`) — Claude API with tool use for the ReAct loop
+- **Google Generative AI SDK** (`@google/generative-ai`) — Gemini API with function calling for the ReAct loop
 - **rss-parser** — RSS feed parsing
 - **Cheerio** — Lightweight HTML scraping
 - **dotenv** — Environment variable management

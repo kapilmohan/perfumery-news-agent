@@ -1,6 +1,5 @@
-import Anthropic from "@anthropic-ai/sdk";
+import { GoogleGenerativeAI, SchemaType, Part } from "@google/generative-ai";
 import { TOOL_DEFINITIONS, executeTool } from "./tools/registry";
-import { AgentStep } from "./types";
 
 const SYSTEM_PROMPT = `You are a perfumery news research agent. Your goal is to gather the latest perfumery news from multiple sources, analyze them, and produce a comprehensive markdown report.
 
@@ -40,104 +39,135 @@ The report should follow this format:
 
 Be thorough but concise. Include links to original articles. If a source fails, note it and move on — do not stop the entire process.`;
 
+// Map our JSON Schema types to Gemini's SchemaType
+function mapSchemaType(type: string): SchemaType {
+  const typeMap: Record<string, SchemaType> = {
+    string: SchemaType.STRING,
+    number: SchemaType.NUMBER,
+    boolean: SchemaType.BOOLEAN,
+    object: SchemaType.OBJECT,
+    array: SchemaType.ARRAY,
+  };
+  return typeMap[type] || SchemaType.STRING;
+}
+
+function convertToolsForGemini() {
+  return TOOL_DEFINITIONS.map((t) => {
+    const params = t.parameters as any;
+    const properties: Record<string, any> = {};
+
+    if (params.properties) {
+      for (const [key, val] of Object.entries(params.properties)) {
+        const prop = val as any;
+        properties[key] = {
+          type: mapSchemaType(prop.type),
+          description: prop.description,
+        };
+      }
+    }
+
+    return {
+      name: t.name,
+      description: t.description,
+      parameters: {
+        type: SchemaType.OBJECT,
+        properties,
+        required: params.required || [],
+      },
+    };
+  });
+}
+
 export async function runAgent(): Promise<string> {
-  const client = new Anthropic();
-  const steps: AgentStep[] = [];
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) {
+    throw new Error("GEMINI_API_KEY is not set");
+  }
 
-  // Convert our tool definitions to Anthropic's tool format
-  const tools: Anthropic.Messages.Tool[] = TOOL_DEFINITIONS.map((t) => ({
-    name: t.name,
-    description: t.description,
-    input_schema: t.parameters as Anthropic.Messages.Tool["input_schema"],
-  }));
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const tools = convertToolsForGemini();
 
-  const messages: Anthropic.Messages.MessageParam[] = [
-    {
-      role: "user",
-      content:
-        "Please gather the latest perfumery news from all available sources and produce a comprehensive markdown report. Today's date is " +
-        new Date().toISOString().split("T")[0] +
-        ". Start by fetching from the RSS feeds and searching NewsAPI, then analyze and write the report.",
-    },
-  ];
+  const model = genAI.getGenerativeModel({
+    model: "gemini-2.0-flash",
+    systemInstruction: SYSTEM_PROMPT,
+    tools: [{ functionDeclarations: tools }],
+  });
+
+  const chat = model.startChat();
 
   const MAX_TURNS = 20;
   let reportPath = "";
 
+  // Initial user message
+  const userMessage =
+    "Please gather the latest perfumery news from all available sources and produce a comprehensive markdown report. Today's date is " +
+    new Date().toISOString().split("T")[0] +
+    ". Start by fetching from the RSS feeds and searching NewsAPI, then analyze and write the report.";
+
+  console.log("[User]", userMessage.slice(0, 100) + "...");
+
+  let response = await chat.sendMessage(userMessage);
+
   for (let turn = 0; turn < MAX_TURNS; turn++) {
     console.log(`\n--- Agent Turn ${turn + 1} ---`);
 
-    const response = await client.messages.create({
-      model: "claude-sonnet-4-20250514",
-      max_tokens: 4096,
-      system: SYSTEM_PROMPT,
-      tools,
-      messages,
-    });
+    const candidate = response.response.candidates?.[0];
+    if (!candidate) {
+      console.log("[Agent] No candidate in response, stopping.");
+      break;
+    }
 
-    // Collect all text and tool_use blocks
-    const assistantContent = response.content;
-    const textBlocks = assistantContent.filter((b) => b.type === "text");
-    const toolUseBlocks = assistantContent.filter((b) => b.type === "tool_use");
+    const parts = candidate.content.parts;
 
-    // Log any thoughts
-    for (const block of textBlocks) {
-      if (block.type === "text") {
-        console.log(`[Thought] ${block.text.slice(0, 200)}${block.text.length > 200 ? "..." : ""}`);
-        steps.push({ thought: block.text });
+    // Log text parts
+    for (const part of parts) {
+      if (part.text) {
+        console.log(`[Thought] ${part.text.slice(0, 200)}${part.text.length > 200 ? "..." : ""}`);
       }
     }
 
-    // If the model wants to stop, we're done
-    if (response.stop_reason === "end_turn" && toolUseBlocks.length === 0) {
+    // Collect function calls
+    const functionCalls = parts.filter((p) => p.functionCall);
+
+    if (functionCalls.length === 0) {
       console.log("\n[Agent] Finished reasoning — no more tool calls.");
       break;
     }
 
-    // Execute each tool call
-    if (toolUseBlocks.length > 0) {
-      // Add the full assistant message to conversation
-      messages.push({ role: "assistant", content: assistantContent });
+    // Execute each function call and build response parts
+    const functionResponses: Part[] = [];
 
-      const toolResults: Anthropic.Messages.ToolResultBlockParam[] = [];
+    for (const part of functionCalls) {
+      const fc = part.functionCall!;
+      const toolName = fc.name;
+      const toolArgs = (fc.args || {}) as Record<string, string>;
 
-      for (const block of toolUseBlocks) {
-        if (block.type === "tool_use") {
-          console.log(`[Action] ${block.name}(${JSON.stringify(block.input).slice(0, 100)})`);
+      console.log(`[Action] ${toolName}(${JSON.stringify(toolArgs).slice(0, 100)})`);
 
-          const observation = await executeTool(
-            block.name,
-            block.input as Record<string, string>
-          );
+      const observation = await executeTool(toolName, toolArgs);
 
-          // Check if this was a write_report call and capture the path
-          if (block.name === "write_report") {
-            try {
-              const parsed = JSON.parse(observation);
-              if (parsed.path) reportPath = parsed.path;
-            } catch {}
-          }
-
-          console.log(`[Observation] ${observation.slice(0, 150)}${observation.length > 150 ? "..." : ""}`);
-
-          steps.push({
-            thought: "",
-            action: { tool: block.name, input: block.input as Record<string, string> },
-            observation,
-          });
-
-          toolResults.push({
-            type: "tool_result",
-            tool_use_id: block.id,
-            content: observation,
-          });
-        }
+      // Check if this was a write_report call and capture the path
+      if (toolName === "write_report") {
+        try {
+          const parsed = JSON.parse(observation);
+          if (parsed.path) reportPath = parsed.path;
+        } catch {}
       }
 
-      messages.push({ role: "user", content: toolResults });
+      console.log(`[Observation] ${observation.slice(0, 150)}${observation.length > 150 ? "..." : ""}`);
+
+      functionResponses.push({
+        functionResponse: {
+          name: toolName,
+          response: JSON.parse(observation),
+        },
+      });
     }
+
+    // Send tool results back to the model
+    response = await chat.sendMessage(functionResponses);
   }
 
-  console.log(`\n[Agent] Completed in ${steps.length} steps`);
+  console.log(`\n[Agent] Completed`);
   return reportPath;
 }
