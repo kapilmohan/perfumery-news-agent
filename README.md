@@ -1,77 +1,59 @@
 # Perfumery News Agent
 
-A ReAct-style AI agent that autonomously gathers the latest perfumery news from multiple sources, reasons about what it finds, and produces a curated markdown briefing — powered by Google Gemini.
+An AI-powered agent that gathers perfumery news from multiple sources in parallel, uses Gemini to discover additional sources and write an editorial-quality briefing — all in two lean LLM calls.
 
 ## How It Works
 
-This is not a linear script. It's an **autonomous agent loop** built on the [ReAct pattern](https://arxiv.org/abs/2210.03629) (Reason + Act):
-
 ```
-┌─────────────────────────────────────────────┐
-│                  Agent Loop                 │
-│                                             │
-│   ┌──────────┐                              │
-│   │  THINK   │ ← Gemini reasons about        │
-│   │          │   what info it has/needs      │
-│   └────┬─────┘                              │
-│        │                                    │
-│        ▼                                    │
-│   ┌──────────┐                              │
-│   │   ACT    │ ← Picks a tool & calls it    │
-│   │          │   (fetch RSS, search news,   │
-│   └────┬─────┘    scrape page, write report)│
-│        │                                    │
-│        ▼                                    │
-│   ┌──────────┐                              │
-│   │ OBSERVE  │ ← Receives tool results,     │
-│   │          │   decides next step           │
-│   └────┬─────┘                              │
-│        │                                    │
-│        └──── loops until report is written ──┘
-└─────────────────────────────────────────────┘
+Phase 0: Source Discovery
+  Gemini evaluates current sources, suggests up to 5 more
+                    │
+                    ▼
+Phase 1: Parallel Gather
+  ├── RSS feeds (allgoodscents, nstperfume, etc.)
+  ├── Google News searches (fragrantica, general perfume news)
+  ├── Scrapes (LLM-discovered sources)          All via Promise.allSettled
+  └── Deduplicate by title similarity
+                    │
+                    ▼
+Phase 2: Report Generation
+  Single Gemini call: article summaries → narrative markdown report
+                    │
+                    ▼
+Phase 3: Write
+  reports/perfumery-news-YYYY-MM-DD.md
 ```
 
-Gemini decides at each step:
-- Which RSS feeds to pull
-- Whether to search for additional news via NewsAPI
-- Which articles deserve a full page scrape for more context
-- How to categorize and summarize everything
-- When it has enough information to write the final report
+- **Phase 0** is the only "intelligent" part of gathering — Gemini reviews your configured sources and suggests additional RSS feeds, search queries, or pages to scrape
+- **Phase 1** is deterministic code — fetches everything in parallel, no LLM involved
+- **Phase 2** is a single Gemini call with a strong editorial prompt — produces narrative analysis, not link dumps
+- Total: ~2 Gemini calls, ~5-8K tokens (vs 50K+ with the old ReAct loop)
 
 ## Architecture
 
 ```
 src/
 ├── index.ts              Entry point — loads env, runs the agent
-├── agent.ts              ReAct loop — manages Gemini conversation + tool dispatch
-├── types.ts              Shared types (Article, AgentStep, ToolDefinition)
+├── agent.ts              Gather-then-generate pipeline (discover → gather → report → write)
+├── sources.ts            Single source of truth for all default news sources
+├── types.ts              Shared types (Article)
 └── tools/
-    ├── registry.ts       Tool definitions (Gemini function-calling format) & dispatcher
-    ├── fetch-rss.ts      Fetch articles from perfumery RSS feeds
-    ├── search-news.ts    Search NewsAPI for perfumery keywords
-    ├── scrape-page.ts    Scrape full article text from a URL via Cheerio
+    ├── fetch-rss.ts      Fetch articles from any RSS feed URL
+    ├── search-news.ts    Search via Google News RSS (or NewsAPI if key provided)
+    ├── scrape-page.ts    Scrape page content (fetch → Playwright → Firecrawl fallback)
     └── write-report.ts   Write the final markdown report to reports/
 ```
-
-### Tools Available to the Agent
-
-| Tool | Description |
-|------|-------------|
-| `fetch_rss` | Pull articles from known perfumery RSS feeds (Fragrantica, Basenotes, CaFleureBon, The Perfume Society) or any custom RSS URL |
-| `search_news` | Search NewsAPI for perfumery-related articles with configurable query and date range |
-| `scrape_page` | Scrape and extract article text from any URL for deeper analysis |
-| `write_report` | Write the final curated markdown report to `reports/` |
 
 ### Output
 
 The agent produces a dated markdown report in `reports/perfumery-news-YYYY-MM-DD.md` with:
 
-- **Executive Summary** — Week's biggest stories at a glance
-- **New Launches** — Latest perfume releases
+- **Executive Summary** — Week's biggest stories and what they signal
+- **New Launches** — Latest perfume releases, grouped by theme
 - **Industry News** — Business moves, acquisitions, market trends
 - **Trends & Culture** — Fragrance trends, cultural moments
 - **Reviews & Recommendations** — Notable reviews
-- **Sources** — Links back to all original articles
+- **Sources** — Links back to original articles (where available)
 
 ## Usage
 
@@ -80,6 +62,7 @@ The agent produces a dated markdown report in `reports/perfumery-news-YYYY-MM-DD
 - Node.js 18+
 - A [Google Gemini API key](https://aistudio.google.com/apikey)
 - (Optional) A [NewsAPI key](https://newsapi.org/) for broader news search
+- (Optional) A [Firecrawl API key](https://firecrawl.dev/) for scraping Cloudflare-protected sites
 
 ### Setup
 
@@ -99,7 +82,8 @@ Add your API keys:
 
 ```
 GEMINI_API_KEY=your-gemini-api-key
-NEWSAPI_KEY=your-newsapi-key    # optional
+NEWSAPI_KEY=your-newsapi-key          # optional
+FIRECRAWL_API_KEY=your-firecrawl-key  # optional
 ```
 
 ### Run
@@ -108,28 +92,36 @@ NEWSAPI_KEY=your-newsapi-key    # optional
 npm start
 ```
 
-This compiles the TypeScript and runs the agent. You'll see the agent's reasoning in real time:
-
 ```
-=== Perfumery News Agent (ReAct) ===
+=== Perfumery News Agent ===
 
---- Agent Turn 1 ---
-[Thought] I'll start by fetching articles from all four RSS feeds...
-[Action] fetch_rss({"feed":"fragrantica"})
-[Observation] {"count":15,"articles":[...]}
+=== Phase 0: Source discovery ===
 
---- Agent Turn 2 ---
-[Thought] Good, got 15 articles from Fragrantica. Let me also fetch Basenotes...
-[Action] fetch_rss({"feed":"basenotes"})
-[Observation] {"count":12,"articles":[...]}
+[Discover] Asking Gemini to evaluate current sources...
+[Discover] Gemini suggested 3 additional sources:
+  rss: Now Smell This → https://nstperfume.com/feed/
+  search: Perfume Industry News → perfume industry news
+  rss: The Perfume Society → https://perfumesociety.org/feed/
 
-...
+[Sources] 3 default + 3 discovered = 6 total
 
---- Agent Turn 8 ---
-[Action] write_report({"content":"# Perfumery News Briefing — 2026-02-27\n..."})
-[Observation] {"success":true,"path":"reports/perfumery-news-2026-02-27.md"}
+=== Phase 1: Gathering articles ===
 
-Report generated: reports/perfumery-news-2026-02-27.md
+[Gather] rss:allgoodscents: 15 articles
+[Gather] search:fragrantica: 20 articles
+[Gather] search:news: 20 articles
+[Gather] rss:Now Smell This: 10 articles
+
+[Gather] Total: 65 raw → 58 deduplicated articles, 1 errors
+
+=== Phase 2: Generating report ===
+
+[Generate] Sending 58 articles to Gemini (prompt: 12403 chars)
+[Generate] Received report (8521 chars)
+
+=== Phase 3: Writing report ===
+
+[Write] Report saved to reports/perfumery-news-2026-02-27.md
 ```
 
 ### Build Only
@@ -140,10 +132,10 @@ npm run build
 
 ## Tech Stack
 
-- **TypeScript** — Type-safe agent implementation
-- **Google Generative AI SDK** (`@google/generative-ai`) — Gemini API with function calling for the ReAct loop
+- **TypeScript** — Type-safe implementation
+- **Google Generative AI SDK** (`@google/generative-ai`) — Gemini for source discovery and report writing
 - **rss-parser** — RSS feed parsing
-- **Cheerio** — Lightweight HTML scraping
+- **Cheerio + Playwright + Firecrawl** — Tiered web scraping (fast → headless → cloud)
 - **dotenv** — Environment variable management
 
 ## License
